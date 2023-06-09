@@ -1,0 +1,10 @@
+fastapi
+pytesseract
+unstructured_inference
+pdf2image
+unstructured
+pdfminer
+langchain
+openai
+chromadb
+tiktoken
