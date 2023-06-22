@@ -10,4 +10,8 @@ tiktoken
 unstructured[local-inference]
 layoutparser[layoutmodels,tesseract]
 bs4
+pinecone-client
 
+
+lark
+pinecone-client

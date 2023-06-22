@@ -9,9 +9,8 @@ from helpers import (
     is_link,
     is_pdf,
     load_web_based_link_as_document,
-    text_split,
-    get_additional_info_from_document,
-    create_prompt,
+    get_additional_info_from_document_using_chroma,
+    get_additional_info_from_document_using_pine_cone,
     run_chain,
     RetrivalBaseQaResponse,
 )
@@ -38,11 +37,11 @@ async def upload_link(question: str, input_link: WebLink):
         raise HTTPException(status_code=500, detail="Invalid link")
     
     documents = load_web_based_link_as_document(link)
-    additional_info = get_additional_info_from_document(question, documents)
+    additional_info = get_additional_info_from_document_using_pine_cone(question, documents)
 
     try:
-        prompt = create_prompt(additional_info)
-        response = run_chain(prompt)
+        
+        response = run_chain(additional_info, question)
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
         return HTTPException(status_code=500, detail="Internal Server Error")
@@ -75,10 +74,9 @@ async def upload_file(question: str, input_file: UploadFile):
             documents = load_pdf_file_as_documents(file_path)
         else:
             documents = load_unstructured_file_as_documents(file_path)
-        additional_info = get_additional_info_from_document(question, documents)
+        additional_info = get_additional_info_from_document_using_pine_cone(question, documents)
         remove_file(file_path)
-        prompt = create_prompt(additional_info)
-        response = run_chain(prompt)
+        response = run_chain(additional_info, question)
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}", exc_info=True)
         return HTTPException(status_code=500, detail="Internal Server Error")
@@ -86,3 +84,8 @@ async def upload_file(question: str, input_file: UploadFile):
     return RetrivalBaseQaResponse(
         question=question, answer=response, status_code=200
     ).dict()
+
+
+
+
+

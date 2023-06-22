@@ -1,12 +1,10 @@
 from urllib.parse import urlparse
-from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from pydantic import BaseModel
 from langchain.vectorstores import Chroma
 import logging
 import os
 from dotenv import load_dotenv
-from langchain.document_loaders import PyPDFLoader
 from langchain.document_loaders import WebBaseLoader, UnstructuredFileLoader
 from langchain import LLMChain, OpenAI
 from langchain.prompts import (
@@ -21,6 +19,14 @@ from langchain.chat_models import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 from typing import List
 import warnings
+import pinecone
+from langchain.vectorstores import Pinecone
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains.question_answering import load_qa_chain
+from langchain.chains import SimpleSequentialChain
+from langchain.document_loaders import UnstructuredPDFLoader
+
+
 
 warnings.filterwarnings("ignore")
 
@@ -30,9 +36,13 @@ openai_api_key = os.environ.get("OPEN_API_KEY")
 ai_model = os.environ.get("AI_MODEL")
 ai_prompt_template = os.environ.get("AI_PROMPT_TEMPLATE")
 system_prompt_template = os.environ.get("SYSTEM_PROMPT_TEMPLATE")
-
+pine_cone_api_key = os.environ.get("PINECONE_API_KEY")
+pinecone_env = os.environ.get("PINECONE_ENV")
 logger = logging.getLogger(__name__)
 
+pinecone.init(
+    api_key=pine_cone_api_key, environment=pinecone_env
+)
 
 class RetrivalBaseQaResponse(BaseModel):
     """pydantic model for API response"""
@@ -58,8 +68,10 @@ def text_split(docs: List[Document]) -> List[Document]:
     Returns:
         list[str]: The split texts.
     """
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
     texts = text_splitter.split_documents(docs)
+    # text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    # texts = text_splitter.split_documents(docs)
     return texts
 
 
@@ -109,8 +121,10 @@ def load_pdf_file_as_documents(file_path: str) -> List[Document]:
     Returns:
         list[str]: The loaded documents.
     """
-    loader = PyPDFLoader(file_path)
-    documents = loader.load_and_split()
+    
+
+    loader = UnstructuredPDFLoader(file_path) 
+    documents = loader.load()
     return documents
 
 
@@ -128,8 +142,75 @@ def load_web_based_link_as_document(link: str) -> List[Document]:
     documents = loader.load()
     return documents
 
+def get_additional_info_from_document_using_pine_cone(question: str, documents: List[Document], upload_doc_in_pine_cone = True) -> str:
+    """
+    Retrieve additional information from documents using Pinecone vector indexes.
 
-def get_additional_info_from_document(question: str, documents: List[Document]) -> str:
+    Args:
+        question (str): The question.
+        documents (List[Document]): The documents to search.
+        upload_doc_in_pine_cone (bool): Whether to upload the documents to the Pinecone index.
+
+    Returns:
+        str: The retrieved information.
+    """
+    index_name = "langchain1"
+    if not index_name in pinecone.list_indexes():
+        pinecone.create_index("langchain1", dimension=1536)
+
+    embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+
+    texts = text_split(documents)
+    if upload_doc_in_pine_cone:
+        page_content = []
+        metadatas= []
+        for t in texts:
+            page_content.append(t.page_content)
+            metadatas.append({"doc_id":"abc_doc"})
+        docsearch = Pinecone.from_texts(page_content,embeddings, index_name="langchain1", metadatas=metadatas)
+    else:
+        docsearch = Pinecone.from_existing_index(embedding=embeddings, index_name="langchain1")
+    docs = docsearch.similarity_search(query=question, include_metadata=True,filter={"doc_id":"abc_doc"})
+    return docs
+def create_chain_one():
+    """
+    Create the first chain for getting additional info of user question from document or link.
+
+    Returns:
+        LLMChain: The created chain.
+    """
+  
+    llm = OpenAI(temperature=0, openai_api_key=openai_api_key)
+    chain = load_qa_chain(llm, chain_type="stuff")
+    return chain
+
+def create_chain_two():
+    """
+    Create the second chain for getting anser of user question from chat gpt.
+
+    Returns:
+        LLMChain: The created chain.
+    """
+    llm = OpenAI(temperature=0, openai_api_key=openai_api_key)
+  
+    system_message_prompt = SystemMessagePromptTemplate(
+        prompt=PromptTemplate(template=system_prompt_template, input_variables=[])
+    )
+    human_message_prompt = HumanMessagePromptTemplate(
+        prompt=PromptTemplate(template="{query}", input_variables=["query"])
+    )
+    ai_message_prompt = AIMessagePromptTemplate(
+        prompt=PromptTemplate(template=ai_prompt_template, input_variables=[])
+    )
+    chat_prompt = ChatPromptTemplate.from_messages(
+        [system_message_prompt, human_message_prompt, ai_message_prompt]
+    )
+    chain =LLMChain(llm=llm, prompt=chat_prompt)
+    return chain
+    
+    
+
+def get_additional_info_from_document_using_chroma(question: str, documents: List[Document]) -> str:
     """
     Get the content of a document that is relevant to the given question.
 
@@ -148,6 +229,8 @@ def get_additional_info_from_document(question: str, documents: List[Document]) 
     qa = ConversationalRetrievalChain.from_llm(model, retriever=retriever)
     result = qa(dict(question=question, chat_history=[]))
     answer = result.get("answer")
+    # docs=db.similarity_search(question)
+    # return docs[0].page_content
     return answer
 
 
@@ -180,7 +263,7 @@ def is_pdf(file_path: str) -> bool:
     return ext.lower() == ".pdf"
 
 
-def run_chain(prompt) -> str:
+def run_chain(adittional_docs, question) -> str:
     """
     Run the language model chain to generate a response.
 
@@ -192,10 +275,13 @@ def run_chain(prompt) -> str:
     Returns:
         str: The generated response.
     """
-    model = OpenAI(model_name=ai_model, openai_api_key=openai_api_key)
-    chain = LLMChain(llm=model, prompt=prompt)
-    response = chain.run({})
-    return response
+
+    chain_one = create_chain_one()
+    chain_two = create_chain_two()
+
+    overall_chain = SimpleSequentialChain(chains=[chain_one,chain_two])
+    answer = overall_chain.run(input={"input_documents":adittional_docs, "question":question})
+    return answer
 
 
 def create_prompt(additional_info: str) -> ChatPromptTemplate:
@@ -222,3 +308,10 @@ def create_prompt(additional_info: str) -> ChatPromptTemplate:
         [system_message_prompt, human_message_prompt, ai_message_prompt]
     )
     return chat_prompt
+
+
+
+
+
+
+
